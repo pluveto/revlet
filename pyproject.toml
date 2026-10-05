@@ -1,0 +1,120 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "revlet"
+version = "0.1.0"
+description = "A Salsa-inspired incremental computation library for Python."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "pluveto" }]
+dependencies = []
+keywords = ["incremental", "memoization", "dependency-graph", "salsa", "computation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Source = "https://github.com/pluveto/revlet"
+Issues = "https://github.com/pluveto/revlet/issues"
+Documentation = "https://github.com/pluveto/revlet/blob/main/README.md"
+Changelog = "https://github.com/pluveto/revlet/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+test = ["pytest>=8.3", "pytest-cov>=6"]
+dev = [
+    { include-group = "test" },
+    "build>=1.2",
+    "mypy>=1.17",
+    "pyright>=1.1.414",
+    "ruff>=0.11",
+    "twine>=6.1",
+]
+
+[tool.uv.dependency-groups]
+dev = { requires-python = ">=3.12" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/revlet"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/revlet/**/*.py",
+    "/src/revlet/**/*.pyi",
+    "/src/revlet/py.typed",
+    "/tests/**/*.py",
+    "/docs/usage.md",
+    "/docs/implementation.md",
+    "/docs/compatibility.md",
+    "/docs/releasing.md",
+    "/examples/*.py",
+    "/examples/README.md",
+    "/benchmarks/*.py",
+    "/benchmarks/README.md",
+    "/scripts/check_dist.py",
+    "/.github/workflows/*.yml",
+    "/.github/dependabot.yml",
+    "/README.md",
+    "/CONTRIBUTING.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.per-file-target-version]
+"**/*.pyi" = "py312"
+"scripts/*.py" = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Runtime code deliberately keeps conservative spelling; compatibility is tested
+# on actual interpreters. Modernizing suggestions remain enabled for stubs.
+"src/revlet/*.py" = ["UP006", "UP032", "UP035", "RUF005"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/revlet", "tests/typing/api_usage.py"]
+strict = true
+warn_unreachable = true
+show_error_codes = true
+
+[tool.pyright]
+pythonVersion = "3.12"
+include = ["tests/typing/api_usage.py"]
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib", "-ra"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["revlet"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

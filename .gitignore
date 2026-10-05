@@ -1,0 +1,31 @@
+# Python and packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments and local tools
+.venv/
+venv/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors and local configuration
+.idea/
+.vscode/
+.DS_Store
+.env
+.env.*
+!.env.example
