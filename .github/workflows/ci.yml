@@ -87,4 +87,4 @@ jobs:
       - name: Check benchmark scenarios and report generation
         run: |
           uv run --no-sync python benchmarks/bench_engine.py --sizes 16 --iterations 3 --warmups 2 --fanout 4 --json benchmark-smoke.json
-          uv run --no-sync python benchmarks/report.py benchmark-smoke.json --output benchmark-smoke.md
+          uv run --no-sync python benchmarks/report.py "benchmark-smoke*.json" --output benchmark-smoke.md

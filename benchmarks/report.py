@@ -1,6 +1,7 @@
 """Render benchmark JSON files as a Markdown report using only the standard library."""
 
 import argparse
+import glob
 import json
 import os
 import statistics
@@ -176,7 +177,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("benchmarks/RESULTS.md"))
     args = parser.parse_args()
     try:
-        pairs = [(load_report(path), path) for path in args.results]
+        paths = []
+        for pattern in args.results:
+            matches = [pattern] if pattern.is_file() else [Path(p) for p in glob.glob(str(pattern))]
+            if not matches:
+                raise ValueError("No result files match " + str(pattern))
+            paths.extend(matches)
+        pairs = [(load_report(path), path) for path in paths]
         pairs.sort(
             key=lambda pair: tuple(int(n) for n in pair[0]["environment"]["python"].split("."))
         )
