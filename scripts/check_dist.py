@@ -124,16 +124,22 @@ def check_archives(directory, project):
             "CHANGELOG.md",
             "CONTRIBUTING.md",
             "SECURITY.md",
-            "docs/releasing.md",
             "docs/usage.md",
             "docs/implementation.md",
             "docs/compatibility.md",
             "scripts/check_dist.py",
             "tests/test_distribution.py",
             "examples/basic.py",
+            "benchmarks/bench_engine.py",
+            "benchmarks/report.py",
+            "benchmarks/RESULTS.md",
             ".github/workflows/ci.yml",
         ]
         required.extend("src/revlet/" + name for name in package_files)
+        required.extend(
+            path.relative_to(ROOT).as_posix()
+            for path in sorted((ROOT / "benchmarks/results").glob("cpython-*.json"))
+        )
         for name in required:
             member = sdist.extractfile(prefix + name)
             require(member is not None, "Missing sdist file: " + name)

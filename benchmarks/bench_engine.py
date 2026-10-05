@@ -1,149 +1,301 @@
-"""Local timings for recomputation, hits, cutoff, and guarded iteration.
+"""Measure exact-result incremental workloads on Python 3.9+.
 
-Writes happen outside the timed section. Median is over ``--iterations`` samples.
-The cutoff case changes a scalar inside one comparison bucket, so the heavy
-consumer validates instead of running its loop again.
-
-    python benchmarks/bench_engine.py --iterations 2000 --size 10000
+Run from the repository root:
+    python benchmarks/bench_engine.py --json benchmarks/results/local.json
 """
 
 import argparse
+import gc
+import hashlib
+import json
+import math
+import os
 import platform
 import statistics
-import sys
 import time
-from typing import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import partial
+from importlib.metadata import version
+from pathlib import Path
+from typing import Optional
 
+import revlet
 from revlet import Database, tracked
 
-BUCKET = 1_000_000
+
+def noop() -> None:
+    pass
 
 
-def measure(operation: Callable[[], object], iterations: int) -> float:
-    samples = []
-    for _ in range(iterations):
-        start = time.perf_counter()
-        operation()
-        samples.append((time.perf_counter() - start) * 1e6)
-    return float(statistics.median(samples))
+@dataclass
+class Scenario:
+    name: str
+    operation: Callable[[], int]
+    prepare: Callable[[], None]
+    expected: Callable[[], int]
+    database: Optional[Database] = None
+    executions_per_sample: int = 0
 
 
-def direct_loop(size: int, base: int) -> int:
+def work(size: int, value: int) -> int:
     total = 0
     for _ in range(size):
-        total += base
+        total += value
     return total
 
 
-def same_bucket(old: int, new: int) -> bool:
-    return old // BUCKET == new // BUCKET
+def scan(values: Iterable[int]) -> int:
+    total = 0
+    for value in values:
+        total += value
+    return total
 
 
-def build_heavy(size: int, equivalent: bool):
+def scalar_scenario(name: str, size: int) -> Scenario:
+    state = [3]
+
+    def advance_plain() -> None:
+        state[0] = 8 - state[0]  # Alternate 3 and 5, both odd.
+
+    if name in ("fresh", "cutoff_fresh"):
+
+        def current() -> int:
+            return state[0] % 2 if name == "cutoff_fresh" else state[0]
+
+        return Scenario(
+            name, lambda: work(size, current()), advance_plain, lambda: size * current()
+        )
+
     db = Database()
-    source = db.input(0)
-    step = {"n": 0}
+    source = db.input(state[0])
+    unrelated = db.input(0)
+    cutoff = name == "cutoff"
 
     @tracked
-    def raw(value):
-        return value.value
-
-    if equivalent:
-
-        @tracked(equivalent=same_bucket)
-        def stage(value):
-            return raw(value)
-
-    else:
-
-        @tracked
-        def stage(value):
-            return raw(value)
+    def stage(value):
+        current = value.value
+        return current % 2 if cutoff else current
 
     @tracked
-    def heavy(value):
-        base = stage(value)
-        total = 0
-        for _ in range(size):
-            total += base
-        return total
+    def calculate(value):
+        return work(size, stage(value))
 
-    heavy(source)
+    def query() -> int:
+        return calculate(source)
 
-    def advance():
-        step["n"] += 1
-        if equivalent and step["n"] >= BUCKET:
-            raise RuntimeError("cutoff samples left the comparison bucket")
-        source.value = step["n"]
+    def advance() -> None:
+        if name == "unrelated":
+            unrelated.value = 1 - unrelated.value
+        else:
+            advance_plain()
+            source.value = state[0]
 
-    return advance, lambda: heavy(source)
+    def expected() -> int:
+        return size * (state[0] % 2 if cutoff else state[0])
+
+    if query() != expected():
+        raise RuntimeError("Scalar scenario initialization failed.")
+
+    prepare = noop if name == "hit" else advance
+    operation = query
+    executions = 0 if name in ("hit", "unrelated") else (1 if cutoff else 2)
+    if name == "update_and_read":
+        prepare = noop
+
+        def operation() -> int:
+            advance()
+            return query()
+
+    return Scenario(name, operation, prepare, expected, db, executions)
 
 
-def guarded_iteration(size: int) -> Callable[[], int]:
-    db = Database()
-    view = db.input(list(range(size))).value
+def iteration_scenario(size: int, guarded: bool) -> Scenario:
+    values = list(range(size))
+    db = Database() if guarded else None
+    view = db.input(values).value if db is not None else values
+    return Scenario(
+        "view_scan" if guarded else "list_scan",
+        lambda: scan(view),
+        noop,
+        lambda: size * (size - 1) // 2,
+        db,
+    )
 
-    def scan() -> int:
-        total = 0
-        for value in view:
-            total += value
-        return total
 
-    return scan
+def graph_scenario(size: int, fanout: int, cached: bool) -> Scenario:
+    values = list(range(1, fanout + 1))
+    cursor = [0]
+    db = Database() if cached else None
+    inputs = [db.input(value) for value in values] if db is not None else []
+
+    @tracked
+    def leaf(value):
+        return work(size, value.value)
+
+    @tracked
+    def total():
+        return sum(leaf(value) for value in inputs)
+
+    def fresh() -> int:
+        return sum(work(size, value) for value in values)
+
+    query = db.bind(total) if db is not None else fresh
+
+    def expected() -> int:
+        return size * sum(values)
+
+    def prepare() -> None:
+        index = cursor[0] % fanout
+        cursor[0] += 1
+        values[index] += 1
+        if db is not None:
+            inputs[index].value = values[index]
+
+    if query() != expected():
+        raise RuntimeError("Graph scenario initialization failed.")
+    return Scenario("dag_sparse" if cached else "dag_fresh", query, prepare, expected, db, 2)
+
+
+def measure(scenario: Scenario, iterations: int, warmups: int) -> dict:
+    def check(result: int) -> None:
+        expected = scenario.expected()
+        if type(result) is not int or result != expected:
+            raise RuntimeError(f"{scenario.name}: got {result}, expected {expected}.")
+
+    try:
+        gc.collect()
+        for _ in range(warmups):
+            scenario.prepare()
+            check(scenario.operation())
+        db = scenario.database
+        before = db.cache_info().executions if db is not None else 0
+        samples = []
+        for _ in range(iterations):
+            scenario.prepare()
+            start = time.perf_counter_ns()
+            result = scenario.operation()
+            elapsed = time.perf_counter_ns() - start
+            check(result)
+            samples.append(elapsed)
+        executions = db.cache_info().executions - before if db is not None else None
+        if db is not None and executions != iterations * scenario.executions_per_sample:
+            raise RuntimeError(f"{scenario.name}: unexpected query execution count {executions}.")
+        ordered = sorted(samples)
+        return {
+            "scenario": scenario.name,
+            "samples_ns": samples,
+            "median_us": statistics.median(samples) / 1000,
+            "p95_us": ordered[math.ceil(0.95 * len(ordered)) - 1] / 1000,
+            "min_us": min(samples) / 1000,
+            "query_executions": executions,
+        }
+    finally:
+        if scenario.database is not None:
+            scenario.database.close()
+
+
+def processor_name() -> str:
+    name = platform.processor()
+    if name:
+        return name
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        for line in cpuinfo.read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    return platform.machine()
+
+
+def runtime_digest() -> str:
+    digest = hashlib.sha256()
+    for path in sorted(Path(revlet.__file__).parent.glob("*.py")):
+        digest.update(path.name.encode("utf-8") + b"\0" + path.read_bytes())
+    return digest.hexdigest()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--iterations", type=int, default=2000)
-    parser.add_argument("--size", type=int, default=10000)
+    parser.add_argument("--sizes", "--size", nargs="+", type=int, default=[100, 1000, 10000])
+    parser.add_argument("--iterations", type=int, default=200)
+    parser.add_argument("--warmups", type=int, default=20)
+    parser.add_argument("--fanout", type=int, default=32)
+    parser.add_argument(
+        "--json", type=Path, help="Save environment, statistics, and all raw samples."
+    )
     args = parser.parse_args()
-    if args.iterations < 1 or args.size < 1:
-        raise SystemExit("--iterations and --size must be positive")
-
-    advance_raw, heavy_raw = build_heavy(args.size, equivalent=False)
-    advance_cutoff, heavy_cutoff = build_heavy(args.size, equivalent=True)
-    scan = guarded_iteration(args.size)
-    base = 3
-    if direct_loop(args.size, base) != args.size * base:
-        raise SystemExit("direct loop failed its checksum")
-    advance_raw()
-    if heavy_raw() != args.size:
-        raise SystemExit("changed-scalar query failed its checksum")
-    advance_cutoff()
-    if heavy_cutoff() != 0:
-        raise SystemExit("cutoff query recomputed the heavy result")
-    if scan() != sum(range(args.size)):
-        raise SystemExit("guarded iteration failed its checksum")
-
-    print("revlet bench_engine")
-    print(f"python: {platform.python_implementation()} {sys.version.split()[0]}")
-    print(f"platform: {platform.platform()}")
-    print(f"processor: {platform.processor() or 'unknown'}")
-    print(f"size: {args.size} loop steps or container elements")
-    print(f"iterations: {args.iterations} timed samples; median; writes excluded")
-    print("update: scalar input increases by 1; cutoff stays in the initial bucket")
-    direct = measure(lambda: direct_loop(args.size, base), args.iterations)
-    hit = measure(heavy_raw, args.iterations)
-    changed = measure_after(advance_raw, heavy_raw, args.iterations)
-    cutoff = measure_after(advance_cutoff, heavy_cutoff, args.iterations)
-    guarded = measure(scan, args.iterations)
-    print(f"{'direct recompute':<22} {direct:10.1f} us")
-    print(f"{'warm cache hit':<22} {hit:10.1f} us")
-    print(f"{'changed scalar':<22} {changed:10.1f} us")
-    print(f"{'output cutoff':<22} {cutoff:10.1f} us")
-    print(f"{'guarded iteration':<22} {guarded:10.1f} us")
-
-
-def measure_after(
-    prepare: Callable[[], None], operation: Callable[[], object], iterations: int
-) -> float:
-    samples = []
-    for _ in range(iterations):
-        prepare()
-        start = time.perf_counter()
-        operation()
-        samples.append((time.perf_counter() - start) * 1e6)
-    return float(statistics.median(samples))
+    if min([*args.sizes, args.iterations, args.fanout]) < 1 or args.warmups < 0:
+        parser.error("sizes, iterations, and fanout must be positive; warmups must be non-negative")
+    if len(args.sizes) != len(set(args.sizes)):
+        parser.error("sizes must be unique")
+    report = {
+        "schema_version": 1,
+        "environment": {
+            "revlet": version("revlet"),
+            "python": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "platform": platform.platform(),
+            "processor": processor_name(),
+            "logical_cpus": os.cpu_count(),
+            "gc_enabled": gc.isenabled(),
+        },
+        "benchmark_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "runtime_sha256": runtime_digest(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "parameters": {
+            "sizes": args.sizes,
+            "iterations": args.iterations,
+            "warmups": args.warmups,
+            "fanout": args.fanout,
+        },
+        "results": [],
+    }
+    print(
+        "revlet {} / {} {}".format(
+            report["environment"]["revlet"],
+            platform.python_implementation(),
+            platform.python_version(),
+        ),
+        flush=True,
+    )
+    print("size     scenario           median (us)     p95 (us)", flush=True)
+    for size in args.sizes:
+        factories = [
+            partial(scalar_scenario, name, size)
+            for name in (
+                "fresh",
+                "hit",
+                "recompute",
+                "cutoff_fresh",
+                "cutoff",
+                "unrelated",
+                "update_and_read",
+            )
+        ]
+        factories.extend(
+            [
+                partial(iteration_scenario, size, False),
+                partial(iteration_scenario, size, True),
+                partial(graph_scenario, size, args.fanout, False),
+                partial(graph_scenario, size, args.fanout, True),
+            ]
+        )
+        for factory in factories:
+            result = measure(factory(), args.iterations, args.warmups)
+            result["size"] = size
+            report["results"].append(result)
+            print(
+                "{:<8} {:<18} {:>11.2f} {:>12.2f}".format(
+                    size, result["scenario"], result["median_us"], result["p95_us"]
+                ),
+                flush=True,
+            )
+    report["finished_at"] = datetime.now(timezone.utc).isoformat()
+    if args.json is not None:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"Saved {args.json}", flush=True)
 
 
 if __name__ == "__main__":

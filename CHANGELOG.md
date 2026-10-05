@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0 — pending release
+## 0.1.0 — unreleased
 
-Initial public release under the name **revlet**.
+Initial release.
 
 ### Added
 
@@ -14,7 +14,7 @@ Initial public release under the name **revlet**.
 - Thread coordination, cooperative cancellation, and atomic memo publication.
 - Explicit cache pruning, dependency inspection, and database cleanup.
 - Python 3.9–3.14 runtime support with no third-party runtime dependencies.
-- Bundled Python 3.12 type stubs, examples, and reproducible verification commands.
+- Bundled Python 3.12 type stubs and runnable examples.
 
 ### Compatibility and scope
 
@@ -22,9 +22,4 @@ Initial public release under the name **revlet**.
   can offload synchronous queries to a thread.
 - Managed writes invalidate borrowed views. Writes do not provide rollback.
 - In-place edits conservatively invalidate readers of potentially aliased storage.
-- Native async queries, persistence, automatic eviction, and bundled mathematical
-  solvers are outside this release. See [implementation](docs/implementation.md).
-
-During 0.x, patch releases preserve documented public interfaces. Incompatible
-changes require a minor version increment and migration notes. Internal modules
-and private attributes are not public interfaces.
+- For usage details, see the [user guide](docs/usage.md).

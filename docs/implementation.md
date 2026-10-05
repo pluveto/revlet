@@ -1,96 +1,94 @@
-# Implementation and boundaries
+# How caching works
 
-## Core algorithm
+Revlet is useful when you evaluate related calculations repeatedly while changing
+only some of their inputs. This guide explains when a query runs again and what
+affects the amount of work it can reuse.
 
-Each database owns an input revision, monotonically increasing change stamps,
-interned call identities, and retained memo payloads. Revisions advance once at
-the outermost write scope's exit when a possible change has been registered.
-Change stamps also distinguish successful publications within a revision.
+## Reads determine dependencies
 
-A memo contains the published value and adapter, ordered dependency observations,
-a validation revision, and a result change stamp. On a later revision:
+When a tracked function reads an input or calls another tracked function, Revlet
+records that dependency. A cached call stores its result and the dependencies
+observed during its last successful execution.
 
-1. Validate dependencies in their original observation order.
-2. Recursively bring child queries up to date before comparing their change stamps.
-3. Stop at the first changed dependency and execute the query again.
-4. Capture dependencies into a temporary frame.
-5. Publish only after the function, adaptation, comparison, and cancellation
-   checkpoint complete successfully.
-6. If valid equivalence proves substitution, retain the previous result and change
-   stamp. Always replace the dependency list with the new observations.
+After an input changes, Revlet checks those dependencies when you next call the
+query. It validates nested queries before deciding whether to reuse their callers.
+Dependencies follow the branches your function actually takes and are updated
+whenever the function runs again.
 
-Ordered validation avoids evaluating an obsolete branch after its controlling
-dependency has changed. Same-revision hits avoid revalidating the graph.
+Reads are checked in their original order. If a branch's condition has changed,
+the query runs again before Revlet checks dependencies from that obsolete branch.
 
-## Read and write coordination
+## An unchanged result can stop recomputation
 
-The first implementation uses a database-local reentrant lock. It holds a root's
-consistent read scope across nested calls, and a write scope across its entire
-body. Runtime context variables carry only execution-local frames and cancellation;
-there is no default global database or decorator-owned memo table.
+```python
+from revlet import Database, tracked
 
-Frames have an execution identity and active lifetime. Copied contexts cannot
-continue using a retired frame. Same-thread reentry by a different asyncio task
-is rejected. Foreign database reads from queries are rejected before acquiring
-a foreign lock, avoiding deadlock between opposing invalid cross-database reads.
+db = Database()
+count = db.input(11)
 
-Queries made by a writer use separate temporary node identities. They neither
-reuse nor replace ordinary memo payloads. Cleanup and change publication happen
-on exceptional exits as well as normal ones.
 
-## Aliases and comparison evidence
+@tracked
+def bucket(count):
+    return count.value // 10
 
-The implementation does not traverse whole object graphs to discover every
-shared allocation. Mutable input readers and mutable result producers observe a
-conservative database-local alias dependency. Granting in-place editing marks
-this dependency changed.
 
-Consequently, an edit may recompute readers of other mutable inputs even when
-those inputs are actually independent. This is an explicit correctness fallback.
-Scalar replacement does not incur this broad invalidation. A later adapter
-capability for precise storage provenance can improve precision without weakening
-the contract.
+@tracked
+def label(count):
+    return "Group {}".format(bucket(count))
 
-Mutable container adapters do not provide stable old comparison anchors.
-Custom comparators alone cannot enable unsafe cutoff on aliased old storage.
-Stable adapters make a stronger promise about their stored values and require
-input replacement rather than editing.
 
-Views hold a write epoch and an operation guard. They expire on writes and
-reclamation. Reacquiring a validated cached result creates a current outer guard;
-nested borrowed views can be reused only when their source's change stamp still
-justifies the old storage. Unknown or expired temporary storage is rejected.
+assert label(count) == "Group 1"
+count.value = 12
+assert label(count) == "Group 1"  # bucket runs again; label reuses its result.
+count.value = 20
+assert label(count) == "Group 2"  # Both functions run again.
+```
 
-## Failure and reclamation
+Revlet compares a new result with the previously cached result. When they are
+equivalent, it keeps the previous value and can reuse downstream results. The
+query's dependencies still update to reflect its latest execution.
 
-Failed computations are not published. If a parent catches a failed query, it
-and its dependents remain uncacheable for that execution. This is conservative;
-a future failure-result mechanism could prove more reuse under an explicit
-failure contract.
+You can supply a custom comparison with `@tracked(equivalent=...)`. It should
+return `True` only when callers can use the old value in place of the new one.
+This requires a result adapter with stable stored values; built-in mutable
+containers cannot use this shortcut. See [result equivalence](usage.md#result-equivalence).
 
-Interned nodes use weak references; retained payloads use a database-local
-ordered cache. Dependencies hold node identities alive as needed. Eviction removes
-the payload and its outgoing observations, so a retained parent must re-evaluate
-an evicted child when validation is necessary. Missing payloads cannot masquerade
-as successful entries or prove equality with discarded values.
+## Why editing a collection can cause more work
 
-The core does not retain provisional cycle results in the ordinary cache. An
-explicit solver runs under the same consistent read scope and publishes only its
-final declared result with observed external dependencies.
+Inputs can share mutable storage, including nested objects. An in-place edit
+therefore invalidates queries that read potentially shared mutable data in the
+same database, even when the particular inputs are independent.
 
-## Current implementation limits
+Replacing a scalar input affects readers of that input. For workloads with many
+independent scalar values, separate inputs give Revlet more opportunities to
+reuse computations.
 
-These are implementation decisions, not universal incremental-computation laws:
+Collection reads return views that check their validity as you access elements.
+This adds per-element overhead. The [measured results](../benchmarks/RESULTS.md)
+compare plain-list iteration with protected views, alongside scalar and graph
+workloads. The [benchmark suite](../benchmarks/README.md) includes the commands
+and workload definitions used for those measurements.
 
-- Synchronous, eager query execution; serialized operations within each database.
-- Recursive dependency validation and Python call-stack limits.
-- Conservative alias invalidation and no implicit memory budget.
-- Unknown mutable types require adapters; no built-in NumPy integration.
-- No cross-database dependency graph, persistence, automatic rollback, retries,
-  async query runtime, or bundled mathematical cycle solver.
-- Modern public stubs target Python 3.12 tooling while runtime supports Python 3.9.
-- Approximate equivalence and solver convergence are provider obligations.
-- No claim of protection against raw aliases or native-code bypasses.
+## Failed and cancelled calls
 
-These boundaries are covered by documentation and focused tests. Native code
-remains an option after workload measurements identify a useful target.
+A query result enters the cache after computation, adaptation, comparison, and
+the final cancellation check succeed. Exceptions propagate to the caller. If a
+query catches a child query's failure, that execution remains uncached, so the
+next call retries it. You can return an application error value when you want
+that outcome to be cacheable.
+
+## Keeping cache memory under control
+
+Each database retains successful results until you prune or clear its cache, or
+close it. There is no automatic entry limit. Use `db.prune(max_entries=N)` to evict
+the least recently used results, or `db.clear_cache()` to clear them all.
+
+An evicted dependency is recomputed when a caller needs to validate it. Pruning
+can therefore increase future computation. Clearing or pruning cached results
+also invalidates borrowed views; read the input or query again before using them.
+
+Validation uses Python's call stack. Very deep query chains can reach the
+interpreter's recursion limit; consider grouping work into fewer query levels.
+
+See the [user guide](usage.md) for write scopes, cancellation, custom adapters,
+and database cleanup.

@@ -2,21 +2,18 @@
 
 Salsa-inspired incremental computation for Python 3.9+, with no runtime dependencies.
 
-The synchronous engine provides dynamic dependency tracking, protected value
-access, explicit extension interfaces, and database-local caches. This project
-is independent of the Rust Salsa project.
+Revlet caches function results and tracks the inputs each function reads. When
+an input changes, it recomputes affected queries and reuses results whose
+dependencies are unchanged. Each database has its own inputs and cache.
 
-The first release is **0.1.0**. During 0.x, incompatible public API changes require
-a minor version change and migration notes; patch releases preserve the documented
-API. See [compatibility](https://github.com/pluveto/revlet/blob/main/docs/compatibility.md)
-for supported runtimes and type tools.
+Revlet is independent of the Rust Salsa project.
 
 ## Quick start
 
-Install from this checkout:
+Install from GitHub (requires Git):
 
 ```bash
-python -m pip install .
+python -m pip install "git+https://github.com/pluveto/revlet.git"
 ```
 
 ```python
@@ -39,8 +36,8 @@ price.value = 12
 assert subtotal(price, quantity) == 36
 ```
 
-Queries are ordinary functions. Owned arguments identify the database, and
-nested queries inherit it. For a root with no owned arguments, bind once:
+The inputs identify the database when you call a query. Nested queries use the
+same database. For a query without input arguments, bind it once:
 
 ```python
 @tracked
@@ -52,8 +49,7 @@ calculate_invoice = db.bind(invoice)
 assert calculate_invoice() == 36
 ```
 
-Query definitions can be reused across independent databases. No database
-inheritance or application-wide default database is required.
+You can reuse the same query definitions with inputs from different databases.
 
 ## Mutable data
 
@@ -78,36 +74,35 @@ assert total(items) == 6
 - A write scope registers possible changes even if its body raises. It does not roll back.
 - Borrowed views expire when a managed write begins. Read the input or query again.
 - Use `copy_value(view)` for an explicit independent copy of supported built-in data.
-- External writable aliases must respect the editing contract.
+- If you keep the original collection passed to an input, change it through the
+  input's editing scope so Revlet can track the update.
 - In-place edits conservatively invalidate readers that might share mutable storage.
 
-## What is implemented
+## Working with larger applications
 
-- Transitive lazy validation, dynamic dependency replacement, and early cutoff
-  against a stable previously published result.
-- Database-local cache identities, Python argument binding, typed built-in keys,
-  custom key adapters, and explicit ownership checking.
-- Atomic memo publication; failures and cancellation cannot publish partial work.
-- Coordinated synchronous queries and writes, multi-input write scopes, and
-  cancellation while waiting for another caller.
-- External dependency tokens, value adapters, and isolated explicit cycle solvers.
-- Explicit cache pruning, cache clearing, dependency inspection, and lifecycle cleanup.
-- Python 3.12 syntax in bundled `.pyi` files, with `py.typed` and caller typing checks.
+Use value adapters for custom data types, dependency tokens for external state,
+and cancellation tokens for long computations. You can inspect dependencies and
+prune caches explicitly. The [user guide](https://github.com/pluveto/revlet/blob/main/docs/usage.md)
+covers these APIs and custom cycle solvers.
 
-The initial engine serializes operations within one database. Separate databases
-can run independently. Async applications can use `asyncio.to_thread`; decorating
-an `async def` query is currently rejected.
+Queries within one database run synchronously under a shared lock. Separate
+databases can run independently. Async applications can call synchronous queries
+through `asyncio.to_thread`.
+
+The runtime supports Python 3.9+. Bundled type stubs use Python 3.12 syntax;
+see [typing compatibility](https://github.com/pluveto/revlet/blob/main/docs/compatibility.md)
+for IDE and type checker setup.
 
 ## Documentation
 
-- [Usage and API contracts](https://github.com/pluveto/revlet/blob/main/docs/usage.md)
-- [Algorithm and implementation boundaries](https://github.com/pluveto/revlet/blob/main/docs/implementation.md)
+- [User guide](https://github.com/pluveto/revlet/blob/main/docs/usage.md)
+- [How caching works](https://github.com/pluveto/revlet/blob/main/docs/implementation.md)
 - [Runtime and typing compatibility](https://github.com/pluveto/revlet/blob/main/docs/compatibility.md)
 - [Executable examples](https://github.com/pluveto/revlet/blob/main/examples/README.md)
 - [Benchmarking](https://github.com/pluveto/revlet/blob/main/benchmarks/README.md)
-- [Contributing and verification](https://github.com/pluveto/revlet/blob/main/CONTRIBUTING.md)
+- [Benchmark results](https://github.com/pluveto/revlet/blob/main/benchmarks/RESULTS.md)
+- [Contributing](https://github.com/pluveto/revlet/blob/main/CONTRIBUTING.md)
 - [Changelog](https://github.com/pluveto/revlet/blob/main/CHANGELOG.md)
-- [Release procedure](https://github.com/pluveto/revlet/blob/main/docs/releasing.md)
 
 ## License
 
