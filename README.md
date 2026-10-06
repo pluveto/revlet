@@ -10,10 +10,8 @@ Revlet is independent of the Rust Salsa project.
 
 ## Quick start
 
-Install from GitHub (requires Git):
-
 ```bash
-python -m pip install "git+https://github.com/pluveto/revlet.git"
+python -m pip install revlet
 ```
 
 ```python
