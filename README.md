@@ -1,3 +1,5 @@
+![Minimal necessary computation: the demanded path is recomputed, and unchanged branches stop early.](https://raw.githubusercontent.com/pluveto/0images/master/2026/10/upgit_20261006_1791260205.png)
+
 # revlet
 
 Salsa-inspired incremental computation for Python 3.9+, with no runtime dependencies.
